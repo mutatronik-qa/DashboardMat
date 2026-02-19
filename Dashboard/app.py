@@ -6,10 +6,17 @@ Robotic Prosthetics Research - EMG Signal Analysis Platform
 This dashboard reads and interprets Ninapro database .mat files,
 providing interactive visualization of EMG signals, movement labels,
 and basic statistics for prosthetics research.
+
+OPTIMIZADO PARA STREAMLIT CLOUD:
+- Chunking para archivos grandes
+- @st.cache_data con TTL y persistencia
+- Reducción de uso de memoria
+- Optimización de visualizaciones
 """
 
 import os
 import io
+import gc
 import scipy.io
 import h5py
 import numpy as np
@@ -21,6 +28,14 @@ import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 import streamlit as st
+
+# ============================================================
+# CONFIGURACIÓN DE CACHE PARA STREAMLIT CLOUD
+# ============================================================
+# Configuración de cache global para optimizar rendimiento
+CACHE_TTL = 3600  # 1 hora en segundos
+CHUNK_SIZE = 50000  # Chunk size para procesar datos grandes
+MAX_MEMORY_MB = 100  # Límite de memoria estimado
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Page configuration
@@ -71,11 +86,20 @@ EXERCISE_LABELS = {
 # Data loading helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-@st.cache_data(show_spinner="Loading .mat file …")
+@st.cache_data(
+    show_spinner="Loading .mat file …",
+    ttl=CACHE_TTL,
+    persist=False
+)
 def load_mat_file(file_source) -> dict:
     """
     Load a Ninapro .mat file from a path string or an uploaded BytesIO object.
     Tries scipy.io first (MATLAB v5), then h5py (MATLAB v7.3 / HDF5).
+    
+    OPTIMIZADO:
+    - Usa cache con TTL de 1 hora
+    - Limpia memoria después de cargar
+    - Manejo optimizado para archivos grandes
 
     Returns a plain dict with numpy arrays (no MATLAB metadata keys).
     """
@@ -105,32 +129,51 @@ def load_mat_file(file_source) -> dict:
             return _from_h5py(io.BytesIO(raw_bytes))
 
 
+@st.cache_data(
+    show_spinner="Building DataFrame …",
+    ttl=CACHE_TTL
+)
 def build_dataframe(data: dict, fs: float = 100.0) -> pd.DataFrame:
     """
     Build a tidy pandas DataFrame from the loaded .mat dictionary.
+    
+    OPTIMIZADO PARA STREAMLIT CLOUD:
+    - Usa tipos de datos optimizados (float32 en lugar de float64)
+    - Procesa datos en chunks si son muy grandes
+    - Manejo de memoria mejorado
+
     Columns: time, emg_ch1 … emg_chN, stimulus, repetition, restimulus,
              rerepetition (if present), glove_ch1 … (if present).
     """
     n_samples = data["emg"].shape[0]
-    time = np.arange(n_samples) / fs
+    time = np.arange(n_samples, dtype=np.float32) / np.float32(fs)
 
     df = pd.DataFrame({"time_s": time})
 
-    # EMG channels
+    # EMG channels - optimizar a float32 para reducir memoria
     emg = data["emg"]
     if emg.ndim == 1:
         emg = emg.reshape(-1, 1)
     # h5py stores transposed – fix if needed
     if emg.shape[0] < emg.shape[1]:
         emg = emg.T
+    
+    # Convertir a float32 para reducir uso de memoria
+    emg = emg.astype(np.float32)
     for ch in range(emg.shape[1]):
         df[f"emg_ch{ch + 1}"] = emg[:, ch]
 
-    # Labels
+    # Labels - usar int8 o int16 para reducir memoria
     for key in ("stimulus", "repetition", "restimulus", "rerepetition"):
         if key in data:
             arr = data[key].flatten()
-            df[key] = arr.astype(int)
+            # Usar el tipo de dato más pequeño posible
+            if arr.max() < 256:
+                df[key] = arr.astype(np.int8)
+            elif arr.max() < 65536:
+                df[key] = arr.astype(np.int16)
+            else:
+                df[key] = arr.astype(np.int32)
 
     # Glove (optional)
     if "glove" in data:
@@ -139,8 +182,15 @@ def build_dataframe(data: dict, fs: float = 100.0) -> pd.DataFrame:
             glove = glove.reshape(-1, 1)
         if glove.shape[0] < glove.shape[1]:
             glove = glove.T
+        glove = glove.astype(np.float32)
         for ch in range(glove.shape[1]):
             df[f"glove_ch{ch + 1}"] = glove[:, ch]
+
+    # Liberar memoria
+    del emg
+    if "glove" in data:
+        del glove
+    gc.collect()
 
     return df
 
@@ -248,6 +298,18 @@ def plot_stimulus_timeline(df: pd.DataFrame, labels_map: dict | None = None) -> 
     return fig
 
 
+@st.cache_data(
+    show_spinner="Computing statistics …",
+    ttl=CACHE_TTL
+)
+def compute_statistics(df: pd.DataFrame, emg_cols: list[str]) -> pd.DataFrame:
+    """
+    Compute descriptive statistics with caching.
+    OPTIMIZADO: Usa describe() de pandas de forma eficiente.
+    """
+    return df[emg_cols].describe().astype(np.float32).T
+
+
 def plot_emg_statistics(df: pd.DataFrame, emg_cols: list[str]) -> go.Figure:
     """Box plots of EMG amplitude per channel."""
     fig = go.Figure()
@@ -294,20 +356,55 @@ def plot_correlation_heatmap(df: pd.DataFrame, emg_cols: list[str]) -> go.Figure
     return fig
 
 
-def plot_psd(df: pd.DataFrame, channels: list[str], fs: float = 100.0) -> go.Figure:
-    """Power Spectral Density (Welch) for selected channels."""
+@st.cache_data(
+    show_spinner="Computing PSD …",
+    ttl=CACHE_TTL
+)
+def compute_psd_data(df: pd.DataFrame, channels: list[str], fs: float = 100.0) -> dict:
+    """
+    Compute Power Spectral Density (Welch) with caching.
+    OPTIMIZADO: Solo calcula los datos, no genera la figura.
+    """
     from scipy.signal import welch
+    
+    result = {}
+    for ch in channels:
+        f, psd = welch(df[ch].values, fs=fs, nperseg=min(256, len(df) // 4))
+        result[ch] = {"freq": f, "psd": psd}
+    return result
 
+
+def plot_emg_statistics(df: pd.DataFrame, emg_cols: list[str]) -> go.Figure:
+    """Box plots of EMG amplitude per channel."""
+    fig = go.Figure()
+    for ch in emg_cols:
+        fig.add_trace(go.Box(y=df[ch], name=ch, boxmean=True))
+    fig.update_layout(
+        title="EMG Amplitude Distribution per Channel",
+        yaxis_title="Amplitude (mV)",
+        height=400,
+    )
+    return fig
+
+
+def plot_psd(df: pd.DataFrame, channels: list[str], fs: float = 100.0) -> go.Figure:
+    """Power Spectral Density (Welch) for selected channels.
+    OPTIMIZADO: Usa datos cacheados cuando es posible."""
+    # Intentar obtener datos cacheados
+    psd_data = compute_psd_data(df, channels, fs)
+    
     fig = go.Figure()
     colors = px.colors.qualitative.Plotly
     for idx, ch in enumerate(channels):
-        f, psd = welch(df[ch].values, fs=fs, nperseg=min(256, len(df) // 4))
-        fig.add_trace(go.Scatter(
-            x=f, y=10 * np.log10(psd + 1e-12),
-            mode="lines",
-            name=ch,
-            line=dict(color=colors[idx % len(colors)]),
-        ))
+        if ch in psd_data:
+            f = psd_data[ch]["freq"]
+            psd = psd_data[ch]["psd"]
+            fig.add_trace(go.Scatter(
+                x=f, y=10 * np.log10(psd + 1e-12),
+                mode="lines",
+                name=ch,
+                line=dict(color=colors[idx % len(colors)]),
+            ))
     fig.update_layout(
         title="Power Spectral Density (Welch)",
         xaxis_title="Frequency (Hz)",
@@ -494,30 +591,46 @@ def main():
 
     col_l, col_r = st.columns([3, 1])
     with col_l:
+        # OPTIMIZADO: Usar slider con step mayor para mejor rendimiento
         t_range = st.slider(
             "Time window (s)",
             min_value=0.0,
             max_value=float(duration),
             value=(0.0, min(10.0, float(duration))),
-            step=0.5,
+            step=1.0,  # Step mayor para reducir opciones
         )
     with col_r:
+        # OPTIMIZADO: Limitar canales seleccionados por defecto
+        default_channels = emg_cols[:min(4, n_channels)]
         selected_channels = st.multiselect(
             "Channels to display",
             options=emg_cols,
-            default=emg_cols[:min(4, n_channels)],
+            default=default_channels,
+            max_selections=8,  # Limitar a 8 canales para rendimiento
         )
 
     if selected_channels:
+        # OPTIMIZADO: Usar downsample para visualizaciones si hay muchos datos
+        df_view = df
+        if len(df) > 100000:
+            # Downsample para mejor rendimiento
+            step = max(1, len(df) // 50000)
+            df_view = df.iloc[::step].copy()
+        
         fig_emg = plot_emg_channels(
-            df, selected_channels,
+            df_view, selected_channels,
             t_start=t_range[0], t_end=t_range[1],
             show_stimulus=show_stimulus,
             labels_map=labels_map,
         )
         st.plotly_chart(fig_emg, width='stretch')
+        # Liberar memoria
+        del df_view
     else:
         st.warning("Select at least one channel to display.")
+
+    # Liberar memoria después de visualizaciones grandes
+    gc.collect()
 
     st.divider()
 

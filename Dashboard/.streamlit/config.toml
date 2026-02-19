@@ -1,0 +1,41 @@
+# ============================================================
+# Streamlit Configuration for Streamlit Cloud Deployment
+# ============================================================
+# Configuración optimizada para el Dashboard de EMG de NinaPro
+
+[server]
+# Puerto y configuración del servidor
+port = 8501
+headless = true
+enableXsrfProtection = true
+
+# Límites de memoria y rendimiento
+# Streamlit Cloud tiene límites de memoria, optimizamos aquí
+maxUploadSize = 200  # MB - máximo tamaño de archivo permitido
+maxMessageSize = 200  # MB - máximo tamaño de mensaje
+
+[runner]
+# Configuración de ejecución
+magicEnabled = true
+fastReruns = true  # Habilitar rerenderizado rápido
+
+[browser]
+# Configuración del navegador
+gatherUsageStats = false  # No recopilar estadísticas de uso en producción
+
+[client]
+# Configuración del cliente
+showErrorDetails = true  # Mostrar detalles de error para depuración
+toolbarMode = "minimal"  # Modo de barra de herramientas minimal
+
+[secrets]
+# Configuración de secrets (vacío para desarrollo)
+# En producción, usar secrets de Streamlit Cloud
+
+[theme]
+# Configuración de tema personalizado
+primaryColor = "#FF4B4B"
+backgroundColor = "#0E1117"
+secondaryBackgroundColor = "#262730"
+textColor = "#FAFAFA"
+font = "sans serif"
